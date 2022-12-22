@@ -6,11 +6,12 @@
 #define char_shift 8
 #define char_mask 0b11111111
 #define char_tag 0b00001111
-#define	bool_t 0b00101111
-#define	bool_f 0b01101111
+#define	bool_f 0b00101111
+#define	bool_t 0b01101111
 #define empty_list 0b00111111
 
 typedef unsigned int scm_ptr;
+scm_ptr scheme_entry(void);
 
 static void print_scm_ptr(scm_ptr x) {
 	if ((x & fixnum_mask) == fixnum_tag) {
