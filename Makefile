@@ -4,7 +4,7 @@ compile_scheme:
 	guile compiler.scm
 
 compile_gcc: compile_scheme
-	gcc runtime.c target/scheme.s -o target/scheme.out
+	gcc runtime.c target/scheme.s -m32 -o target/scheme.out
 
 run: compile_gcc
 	./target/scheme.out

@@ -1,6 +1,8 @@
 (define program '())
 (define (emit instruction . args)
-  (set! program (append program (list (apply format #f (string-append instruction "~%") args)))))
+  (let ((noisy #f))
+    (when (or noisy (not (string-prefix? "#" (string-trim instruction))))
+        (set! program (append program (list (apply format #f (string-append instruction "~%") args)))))))
 
 (define unique-label
   (let ([count 0])
@@ -62,11 +64,11 @@
 (define primitives-alist '())
 (define-syntax define-primitive
   (syntax-rules ()
-    [(_ (prim-name arg* ...) b b* ...)
+    [(_ (prim-name si arg* ...) b b* ...)
      (set! primitives-alist
            (assoc-set! primitives-alist 'prim-name
                        (list (length '(arg* ...))
-                             (lambda (arg* ...) b b* ...))))]))
+                             (lambda (si arg* ...) b b* ...))))]))
 
 (define (primitive? x)
   (and (symbol? x) (assq x primitives-alist) #t))
@@ -91,15 +93,15 @@
   (unless (= (length args) (primitive-args-number prim))
     (error "wrong number of arguments")))
 
-(define (emit-primcall expr)
+(define (emit-primcall si expr)
   (let ([prim (car expr)]
         [args (cdr expr)])
     (check-primcall-args prim args)
     (emit "    # prim: ~a" prim)
-    (apply (primitive-emitter prim) args)
+    (apply (primitive-emitter prim) si args)
     (emit "    # ^ prim: ~a" prim)))
 
-;; TODO: unary primitives:
+;; unary primitives:
 ;; fxadd1
 ;; fxsub1
 ;; char->fixnum
@@ -112,41 +114,41 @@
 ;; char?
 ;; fxlognot
 
-(define-primitive (fxadd1 arg)
-  (emit-expr arg)
+(define-primitive (fxadd1 si arg)
+  (emit-expr si arg)
   (emit "    addl $~s, %eax" (immediate-rep 1)))
 
-(define-primitive (fxsub1 arg)
-  (emit-expr arg)
+(define-primitive (fxsub1 si arg)
+  (emit-expr si arg)
   (emit "    subl $~s, %eax" (immediate-rep 1)))
 
-(define-primitive (char->fixnum arg)
-  (emit-expr arg)
+(define-primitive (char->fixnum si arg)
+  (emit-expr si arg)
   (emit "    shrl $~s, %eax" (- char-shift fixnum-shift)))
 
-(define-primitive (fixnum->char arg)
-  (emit-expr arg)
+(define-primitive (fixnum->char si arg)
+  (emit-expr si arg)
   (emit "    shll $~s, %eax" (- char-shift fixnum-shift))
   (emit "    orl $~s, %eax" char-tag))
 
-(define-primitive (fxzero? arg)
-  (emit-expr arg)
+(define-primitive (fxzero? si arg)
+  (emit-expr si arg)
   (emit "    cmpl $~s, %eax" (immediate-rep 0))
   (emit "    sete %al")
   (emit "    movsbl %al, %eax")
   (emit "    sal $~s, %al" bool-bit)
   (emit "    or $~s, %al" bool-tag))
 
-(define-primitive (null? arg)
-  (emit-expr arg)
+(define-primitive (null? si arg)
+  (emit-expr si arg)
   (emit "    cmpl $~s, %eax" empty-list)
   (emit "    sete %al")
   (emit "    movzbl %al, %eax")
   (emit "    sal $~s, %al" bool-bit)
   (emit "    or $~s, %al" bool-tag))
 
-(define-primitive (not arg)
-  (emit-expr arg)
+(define-primitive (not si arg)
+  (emit-expr si arg)
   ;; compare to #f
   (emit "    cmpl $~s, %eax" bool-f)
   (emit "    sete %al")
@@ -154,8 +156,8 @@
   (emit "    sal $~s, %al" bool-bit)
   (emit "    or $~s, %al" bool-tag))
 
-(define-primitive (fixnum? arg)
-  (emit-expr arg)
+(define-primitive (fixnum? si arg)
+  (emit-expr si arg)
   (emit "    and $~s, %al" fixnum-mask)
   (emit "    cmp $~s, %al" fixnum-tag)
   ;; set the lower 16 bits of the result (%al) to 1 if cmp is true
@@ -168,8 +170,8 @@
   ;; apply the boolean tag
   (emit "    or $~s, %al" bool-tag))
 
-(define-primitive (boolean? arg)
-  (emit-expr arg)
+(define-primitive (boolean? si arg)
+  (emit-expr si arg)
   (emit "    andl $~s, %eax" bool-mask)
   (emit "    cmpl $~s, %eax" bool-tag)
   (emit "    sete %al")
@@ -177,8 +179,8 @@
   (emit "    sal $~s, %al" bool-bit)
   (emit "    or $~s, %al" bool-tag))
 
-(define-primitive (char? arg)
-  (emit-expr arg)
+(define-primitive (char? si arg)
+  (emit-expr si arg)
   (emit "    andl $~s, %eax" char-mask)
   (emit "    cmpl $~s, %eax" char-tag)
   (emit "    sete %al")
@@ -186,12 +188,36 @@
   (emit "    sal $~s, %al" bool-bit)
   (emit "    or $~s, %al" bool-tag))
 
-(define-primitive (fxlognot arg)
-  (emit-expr arg)
+(define-primitive (fxlognot si arg)
+  (emit-expr si arg)
   (emit "    xorl $~s, %eax" (immediate-rep fixnum-min)))
 
-;; (if test then else)
+;; TODO: binary primitives:
+;; fx+
+;; fx-
+;; fxlogand
+;; fxlogor
+;; fx=
+;; fx<
+;; fx<=
+;; fx>
+;; fx>=
+;; char=
+;; char<
+;; char<=
+;; char>
+;; char>=
 
+(define-primitive (fx+ si arg1 arg2)
+  ;; evaluate the left argument
+  (emit-expr si arg1)
+  ;; store the result at the current stack index
+  (emit "    movl %eax, ~s(%esp)" si)
+  ;; evaluate the right argument, adjusting the stack index
+  (emit-expr (- si wordsize) arg2)
+  (emit "    addl ~s(%esp), %eax" si))
+
+;; (if test then else)
 (define (if? expr)
   (and (pair? expr)
        (eq? (car expr) 'if)
@@ -207,43 +233,55 @@
   (cadddr expr))
 
 ;; TODO: and, or
-(define (emit-if expr)
+;; TODO: do i handle the stack indices correctly here?
+(define (emit-if si expr)
   (let ([else-label (unique-label)]
         [end-label (unique-label)])
     (emit "    # if test")
-    (emit-expr (if-test expr))
+    (emit-expr si (if-test expr))
     (emit "    # ^ if test")
     (emit "    cmp $~s, %al" bool-f)
     (emit "    je ~a" else-label)
     (emit "    # then")
-    (emit-expr (if-then expr))
+    (emit-expr si (if-then expr))
     (emit "    jmp ~a" end-label)
     (emit "    # ^ then")
     (emit "    # else")
     (emit "~a:" else-label)
-    (emit-expr (if-else expr))
+    (emit-expr si (if-else expr))
     (emit "    # ^ else")
     (emit "~a:" end-label)
     (emit "    # ^ if")))
 
-(define (emit-expr expr)
+(define (emit-expr si expr)
   (cond
    [(immediate? expr) (emit-immediate expr)]
-   [(if? expr)        (emit-if expr)]
-   [(primcall? expr)  (emit-primcall expr)]
+   [(if? expr)        (emit-if si expr)]
+   [(primcall? expr)  (emit-primcall si expr)]
    [else              (error "expression not supported")]))
 
 (define (emit-function-header function-name)
-  (emit ".text")
-  (emit ".globl ~a" function-name)
-  (emit ".type ~a, @function" function-name)
+  (emit "    .globl ~a" function-name)
+  (emit "    .type ~a, @function" function-name)
   (emit "")
   (emit "~a:" function-name))
 
+(define (emit-prelude)
+  (emit "    .text"))
+
 (define (emit-program expr)
+  (emit-prelude)
+  (emit-function-header "L_scheme_entry")
+  (emit-expr (- wordsize) expr)
+  (emit "    ret")
+  (emit "")
   (emit-function-header "scheme_entry")
-  (emit-expr expr)
-  (emit "    ret"))
+  (emit "    movl %esp, %ecx")
+  (emit "    movl 4(%esp), %esp")
+  (emit "    call L_scheme_entry")
+  (emit "    movl %ecx, %esp")
+  (emit "    ret")
+  (emit ""))
 
 (define (compile-program expr)
   (set! program '())
@@ -257,4 +295,4 @@
 
 (write-program
  "target/scheme.s"
- (compile-program '(if (fxzero? (fxadd1 -1)) (fxsub1 10) ())))
+ (compile-program '(if (fx+ (fxadd1 10) (fxsub1 5)) (fx+ 0 -10) #f)))

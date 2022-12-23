@@ -1,4 +1,7 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #define fixnum_shift 2
 #define fixnum_mask 0b11
@@ -11,7 +14,7 @@
 #define empty_list 0b00111111
 
 typedef unsigned int scm_ptr;
-scm_ptr scheme_entry(void);
+scm_ptr scheme_entry(char*);
 
 static void print_scm_ptr(scm_ptr x) {
 	if ((x & fixnum_mask) == fixnum_tag) {
@@ -30,7 +33,50 @@ static void print_scm_ptr(scm_ptr x) {
 	printf("\n");
 }
 
+static char* allocate_protected_space(int size) {
+	int page = getpagesize();
+	int status;
+	int aligned_size = ((size + page - 1) / page) * page;
+	/* Allocate requested size + 2 pages, allow reads and writes */
+	char* p = mmap(0, aligned_size + 2 * page,
+	               PROT_READ | PROT_WRITE,
+	               MAP_ANONYMOUS | MAP_PRIVATE,
+	               0, 0);
+	if (p == MAP_FAILED) {
+		printf("mmap failed\n");
+		exit(-1);
+	}
+	/* protect the first page against reads and writes */
+	status = mprotect(p, page, PROT_NONE);
+	if (status != 0) {
+		printf("mprotect of the first page failed\n");
+		exit(-1);
+	}
+	/* protect the last page against reads and writes */
+	status = mprotect(p + page + aligned_size, page, PROT_NONE);
+	if (status != 0) {
+		printf("mprotect of the last page failed\n");
+		exit(-1);
+	}
+	return (p + page);
+}
+
+static void deallocate_proteced_space(char* p, int size) {
+	int page = getpagesize();
+	int status;
+	int aligned_size = ((size + page - 1) / page) * page;
+	status = munmap(p - page, aligned_size + 2 * page);
+	if (status != 0) {
+		printf("munmap failed/n");
+		exit(-1);
+	}
+}
+
 int main(int argc, char** argv) {
-	print_scm_ptr(scheme_entry());
+	int stack_size = 16 * 4096; /* holds 16k cells */
+	char* stack_top = allocate_protected_space(stack_size);
+	char* stack_base = stack_top + stack_size;
+	print_scm_ptr(scheme_entry(stack_base));
+	deallocate_proteced_space(stack_top, stack_size);
 	return 0;
 }
