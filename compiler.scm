@@ -101,6 +101,17 @@
     (apply (primitive-emitter prim) si args)
     (emit "    # ^ prim: ~a" prim)))
 
+(define (emit-compare-to-bool)
+  ;; set the lower 16 bits of the result (%al) to 1 if cmp is true
+  ;; can't set all 32 bits, but only the lower 16 bits
+  (emit "    sete %al")
+  ;; extend the sign of %al to %eax, both 0 and 1 extend with 0s
+  (emit "    movzbl %al, %eax")
+  ;; shift left to the relevant boolean bit
+  (emit "    sal $~s, %al" bool-bit)
+  ;; apply the boolean tag
+  (emit "    or $~s, %al" bool-tag))
+
 ;; unary primitives:
 ;; fxadd1
 ;; fxsub1
@@ -134,70 +145,48 @@
 (define-primitive (fxzero? si arg)
   (emit-expr si arg)
   (emit "    cmpl $~s, %eax" (immediate-rep 0))
-  (emit "    sete %al")
-  (emit "    movsbl %al, %eax")
-  (emit "    sal $~s, %al" bool-bit)
-  (emit "    or $~s, %al" bool-tag))
+  (emit-compare-to-bool))
 
 (define-primitive (null? si arg)
   (emit-expr si arg)
   (emit "    cmpl $~s, %eax" empty-list)
-  (emit "    sete %al")
-  (emit "    movzbl %al, %eax")
-  (emit "    sal $~s, %al" bool-bit)
-  (emit "    or $~s, %al" bool-tag))
+  (emit-compare-to-bool))
 
 (define-primitive (not si arg)
   (emit-expr si arg)
   ;; compare to #f
   (emit "    cmpl $~s, %eax" bool-f)
-  (emit "    sete %al")
-  (emit "    movzbl %al, %eax")
-  (emit "    sal $~s, %al" bool-bit)
-  (emit "    or $~s, %al" bool-tag))
+  (emit-compare-to-bool))
 
 (define-primitive (fixnum? si arg)
   (emit-expr si arg)
   (emit "    and $~s, %al" fixnum-mask)
   (emit "    cmp $~s, %al" fixnum-tag)
-  ;; set the lower 16 bits of the result (%al) to 1 if cmp is true
-  ;; can't set all 32 bits, but only the lower 16 bits
-  (emit "    sete %al")
-  ;; extend the sign of %al to %eax, both 0 and 1 extend with 0s
-  (emit "    movzbl %al, %eax")
-  ;; shift left to the relevant boolean bit
-  (emit "    sal $~s, %al" bool-bit)
-  ;; apply the boolean tag
-  (emit "    or $~s, %al" bool-tag))
+  (emit-compare-to-bool))
 
 (define-primitive (boolean? si arg)
   (emit-expr si arg)
   (emit "    andl $~s, %eax" bool-mask)
   (emit "    cmpl $~s, %eax" bool-tag)
-  (emit "    sete %al")
-  (emit "    movzbl %al, %eax")
-  (emit "    sal $~s, %al" bool-bit)
-  (emit "    or $~s, %al" bool-tag))
+  (emit-compare-to-bool))
 
 (define-primitive (char? si arg)
   (emit-expr si arg)
   (emit "    andl $~s, %eax" char-mask)
   (emit "    cmpl $~s, %eax" char-tag)
-  (emit "    sete %al")
-  (emit "    movzbl %al, %eax")
-  (emit "    sal $~s, %al" bool-bit)
-  (emit "    or $~s, %al" bool-tag))
+  (emit-compare-to-bool))
 
 (define-primitive (fxlognot si arg)
   (emit-expr si arg)
   (emit "    xorl $~s, %eax" (immediate-rep fixnum-min)))
 
-;; TODO: binary primitives:
+;; binary primitives:
 ;; fx+
 ;; fx-
 ;; fxlogand
 ;; fxlogor
 ;; fx=
+;; TODO:
 ;; fx<
 ;; fx<=
 ;; fx>
@@ -208,14 +197,45 @@
 ;; char>
 ;; char>=
 
+(define (emit-move-result-to-stack si)
+  (emit "    movl %eax, ~s(%esp)" si))
+
+;; TODO: make all of them accept more than 2 arguments
 (define-primitive (fx+ si arg1 arg2)
   ;; evaluate the left argument
   (emit-expr si arg1)
   ;; store the result at the current stack index
-  (emit "    movl %eax, ~s(%esp)" si)
+  (emit-move-result-to-stack si)
   ;; evaluate the right argument, adjusting the stack index
   (emit-expr (- si wordsize) arg2)
   (emit "    addl ~s(%esp), %eax" si))
+
+(define-primitive (fx- si arg1 arg2)
+  (emit-expr si arg1)
+  (emit-move-result-to-stack si)
+  (emit-expr (- si wordsize) arg2)
+  (emit-move-result-to-stack (- si wordsize))
+  (emit "    movl ~s(%esp), %eax" si)
+  (emit "    subl ~s(%esp), %eax" (- si wordsize)))
+
+(define-primitive (fxlogand si arg1 arg2)
+  (emit-expr si arg1)
+  (emit-move-result-to-stack si)
+  (emit-expr (- si wordsize) arg2)
+  (emit "    andl ~s(%esp), %eax" si))
+
+(define-primitive (fxlogor si arg1 arg2)
+  (emit-expr si arg1)
+  (emit-move-result-to-stack si)
+  (emit-expr (- si wordsize) arg2)
+  (emit "    or ~s(%esp), %eax" si))
+
+(define-primitive (fx= si arg1 arg2)
+  (emit-expr si arg1)
+  (emit-move-result-to-stack si)
+  (emit-expr (- si wordsize) arg2)
+  (emit "    cmpl ~s(%esp), %eax" si)
+  (emit-compare-to-bool))
 
 ;; (if test then else)
 (define (if? expr)
@@ -233,7 +253,6 @@
   (cadddr expr))
 
 ;; TODO: and, or
-;; TODO: do i handle the stack indices correctly here?
 (define (emit-if si expr)
   (let ([else-label (unique-label)]
         [end-label (unique-label)])
@@ -295,4 +314,4 @@
 
 (write-program
  "target/scheme.s"
- (compile-program '(if (fx+ (fxadd1 10) (fxsub1 5)) (fx+ 0 -10) #f)))
+ (compile-program '(fx= (fx+ 10 -10) (fxadd1 -1))))
