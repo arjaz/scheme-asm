@@ -1,8 +1,14 @@
+(use-modules (srfi srfi-1))
+
+(define noisy? #f)
 (define program '())
+
 (define (emit instruction . args)
-  (let ((noisy #f))
-    (when (or noisy (not (string-prefix? "#" (string-trim instruction))))
-        (set! program (append program (list (apply format #f (string-append instruction "~%") args)))))))
+  (set! program (append program (list (apply format #f (string-append instruction "~%") args)))))
+
+(define (emit-comment msg . args)
+  (when noisy?
+    (apply emit (string-append "    # " msg) args)))
 
 (define unique-label
   (let ([count 0])
@@ -56,7 +62,7 @@
    [else        (error "not an immediate constant")]))
 
 (define (emit-immediate x)
-  (emit "    # imm: ~s, 0b~a" x (number->string (immediate-rep x) 2))
+  (emit-comment "imm: ~s, 0b~a" x (number->string (immediate-rep x) 2))
   (emit "    movl $~s, %eax" (immediate-rep x)))
 
 ;; Primitives are stored in the primitives-alist in the following form:
@@ -64,11 +70,11 @@
 (define primitives-alist '())
 (define-syntax define-primitive
   (syntax-rules ()
-    [(_ (prim-name si arg* ...) b b* ...)
+    [(_ (prim-name si env arg* ...) b b* ...)
      (set! primitives-alist
            (assoc-set! primitives-alist 'prim-name
                        (list (length '(arg* ...))
-                             (lambda (si arg* ...) b b* ...))))]))
+                             (lambda (si env arg* ...) b b* ...))))]))
 
 (define (primitive? x)
   (and (symbol? x) (assq x primitives-alist) #t))
@@ -93,15 +99,15 @@
   (unless (= (length args) (primitive-args-number prim))
     (error "wrong number of arguments")))
 
-(define (emit-primcall si expr)
+(define (emit-primcall si env expr)
   (let ([prim (car expr)]
         [args (cdr expr)])
     (check-primcall-args prim args)
-    (emit "    # prim: ~a" prim)
-    (apply (primitive-emitter prim) si args)
-    (emit "    # ^ prim: ~a" prim)))
+    (emit-comment "prim: ~a" prim)
+    (apply (primitive-emitter prim) si env args)
+    (emit-comment "^ prim: ~a" prim)))
 
-(define (emit-compare-to-bool)
+(define (emit-cmp->bool)
   ;; set the lower 16 bits of the result (%al) to 1 if cmp is true
   ;; can't set all 32 bits, but only the lower 16 bits
   (emit "    sete %al")
@@ -125,59 +131,59 @@
 ;; char?
 ;; fxlognot
 
-(define-primitive (fxadd1 si arg)
-  (emit-expr si arg)
+(define-primitive (fxadd1 si env arg)
+  (emit-expr si env arg)
   (emit "    addl $~s, %eax" (immediate-rep 1)))
 
-(define-primitive (fxsub1 si arg)
-  (emit-expr si arg)
+(define-primitive (fxsub1 si env arg)
+  (emit-expr si env arg)
   (emit "    subl $~s, %eax" (immediate-rep 1)))
 
-(define-primitive (char->fixnum si arg)
-  (emit-expr si arg)
+(define-primitive (char->fixnum si env arg)
+  (emit-expr si env arg)
   (emit "    shrl $~s, %eax" (- char-shift fixnum-shift)))
 
-(define-primitive (fixnum->char si arg)
-  (emit-expr si arg)
+(define-primitive (fixnum->char si env arg)
+  (emit-expr si env arg)
   (emit "    shll $~s, %eax" (- char-shift fixnum-shift))
   (emit "    orl $~s, %eax" char-tag))
 
-(define-primitive (fxzero? si arg)
-  (emit-expr si arg)
+(define-primitive (fxzero? si env arg)
+  (emit-expr si env arg)
   (emit "    cmpl $~s, %eax" (immediate-rep 0))
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
-(define-primitive (null? si arg)
-  (emit-expr si arg)
+(define-primitive (null? si env arg)
+  (emit-expr si env arg)
   (emit "    cmpl $~s, %eax" empty-list)
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
-(define-primitive (not si arg)
-  (emit-expr si arg)
+(define-primitive (not si env arg)
+  (emit-expr si env arg)
   ;; compare to #f
   (emit "    cmpl $~s, %eax" bool-f)
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
-(define-primitive (fixnum? si arg)
-  (emit-expr si arg)
+(define-primitive (fixnum? si env arg)
+  (emit-expr si env arg)
   (emit "    and $~s, %al" fixnum-mask)
   (emit "    cmp $~s, %al" fixnum-tag)
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
-(define-primitive (boolean? si arg)
-  (emit-expr si arg)
+(define-primitive (boolean? si env arg)
+  (emit-expr si env arg)
   (emit "    andl $~s, %eax" bool-mask)
   (emit "    cmpl $~s, %eax" bool-tag)
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
-(define-primitive (char? si arg)
-  (emit-expr si arg)
+(define-primitive (char? si env arg)
+  (emit-expr si env arg)
   (emit "    andl $~s, %eax" char-mask)
   (emit "    cmpl $~s, %eax" char-tag)
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
-(define-primitive (fxlognot si arg)
-  (emit-expr si arg)
+(define-primitive (fxlognot si env arg)
+  (emit-expr si env arg)
   (emit "    xorl $~s, %eax" (immediate-rep fixnum-min)))
 
 ;; binary primitives:
@@ -197,45 +203,51 @@
 ;; char>
 ;; char>=
 
-(define (emit-move-result-to-stack si)
+;; TODO: generic emit-mov
+(define (emit-mov-eax-stack si)
   (emit "    movl %eax, ~s(%esp)" si))
 
-;; TODO: make all of them accept more than 2 arguments
-(define-primitive (fx+ si arg1 arg2)
+(define (emit-mov-stack-eax si)
+  (emit "    movl ~s(%esp), %eax" si))
+
+(define (next-stack-index si)
+  (- si wordsize))
+
+(define-primitive (fx+ si env arg1 arg2)
   ;; evaluate the left argument
-  (emit-expr si arg1)
+  (emit-expr si env arg1)
   ;; store the result at the current stack index
-  (emit-move-result-to-stack si)
+  (emit-mov-eax-stack si)
   ;; evaluate the right argument, adjusting the stack index
-  (emit-expr (- si wordsize) arg2)
+  (emit-expr (next-stack-index si) env arg2)
   (emit "    addl ~s(%esp), %eax" si))
 
-(define-primitive (fx- si arg1 arg2)
-  (emit-expr si arg1)
-  (emit-move-result-to-stack si)
-  (emit-expr (- si wordsize) arg2)
-  (emit-move-result-to-stack (- si wordsize))
-  (emit "    movl ~s(%esp), %eax" si)
-  (emit "    subl ~s(%esp), %eax" (- si wordsize)))
+(define-primitive (fx- si env arg1 arg2)
+  (emit-expr si env arg1)
+  (emit-mov-eax-stack si)
+  (emit-expr (next-stack-index si) env arg2)
+  (emit-mov-eax-stack (next-stack-index si))
+  (emit-mov-stack-eax si)
+  (emit "    subl ~s(%esp), %eax" (next-stack-index si)))
 
-(define-primitive (fxlogand si arg1 arg2)
-  (emit-expr si arg1)
-  (emit-move-result-to-stack si)
-  (emit-expr (- si wordsize) arg2)
+(define-primitive (fxlogand si env arg1 arg2)
+  (emit-expr si env arg1)
+  (emit-mov-eax-stack si)
+  (emit-expr (next-stack-index si) env arg2)
   (emit "    andl ~s(%esp), %eax" si))
 
-(define-primitive (fxlogor si arg1 arg2)
-  (emit-expr si arg1)
-  (emit-move-result-to-stack si)
-  (emit-expr (- si wordsize) arg2)
+(define-primitive (fxlogor si env arg1 arg2)
+  (emit-expr si env arg1)
+  (emit-mov-eax-stack si)
+  (emit-expr (next-stack-index si) env arg2)
   (emit "    or ~s(%esp), %eax" si))
 
-(define-primitive (fx= si arg1 arg2)
-  (emit-expr si arg1)
-  (emit-move-result-to-stack si)
-  (emit-expr (- si wordsize) arg2)
+(define-primitive (fx= si env arg1 arg2)
+  (emit-expr si env arg1)
+  (emit-mov-eax-stack si)
+  (emit-expr (next-stack-index si) env arg2)
   (emit "    cmpl ~s(%esp), %eax" si)
-  (emit-compare-to-bool))
+  (emit-cmp->bool))
 
 ;; (if test then else)
 (define (if? expr)
@@ -253,31 +265,86 @@
   (cadddr expr))
 
 ;; TODO: and, or
-(define (emit-if si expr)
+(define (emit-if si env expr)
   (let ([else-label (unique-label)]
         [end-label (unique-label)])
-    (emit "    # if test")
-    (emit-expr si (if-test expr))
-    (emit "    # ^ if test")
+    (emit-comment "if test")
+    (emit-expr si env (if-test expr))
+    (emit-comment "^ if test")
     (emit "    cmp $~s, %al" bool-f)
     (emit "    je ~a" else-label)
-    (emit "    # then")
-    (emit-expr si (if-then expr))
+    (emit-comment "then")
+    (emit-expr si env (if-then expr))
     (emit "    jmp ~a" end-label)
-    (emit "    # ^ then")
-    (emit "    # else")
+    (emit-comment "^ then")
+    (emit-comment "else")
     (emit "~a:" else-label)
-    (emit-expr si (if-else expr))
-    (emit "    # ^ else")
+    (emit-expr si env (if-else expr))
+    (emit-comment "^ else")
     (emit "~a:" end-label)
-    (emit "    # ^ if")))
+    (emit-comment "^ if")))
 
-(define (emit-expr si expr)
+;; (let ((bind1 expr1) ...) body)
+(define (let? expr)
+  (and (pair? expr)
+       (eq? (car expr) 'let)
+       (every (lambda (binding) (eq? (length binding) 2)) (let-bindings expr))
+       #t))
+
+(define (let-bindings expr)
+  (cadr expr))
+
+(define (let-body expr)
+  (caddr expr))
+
+(define (lhs let-binding)
+  (car let-binding))
+
+(define (rhs let-binding)
+  (cadr let-binding))
+
+(define (extend-env name si env)
+  (acons name si env))
+
+;; TODO: let*
+;; env is an alist of form ((var-name . stack-offset)...)
+(define (emit-let si env expr)
+  (define (process-let bindings si new-env)
+    (cond
+     [(null? bindings)
+      (begin
+        (emit-comment "let expr body")
+        (emit-expr si new-env (let-body expr))
+        (emit-comment "^ let expr body"))]
+     [else
+      (let ([b (car bindings)])
+        (emit-comment "let rhs (~s)" (lhs b))
+        (emit-expr si env (rhs b))
+        (emit-mov-eax-stack si)
+        (emit-comment "^ let rhs (~s)" (lhs b))
+        (process-let (cdr bindings)
+                     (next-stack-index si)
+                     (extend-env (lhs b) si new-env)))]))
+  (process-let (let-bindings expr) si env))
+
+;; variables are stored on the stack
+(define (emit-variable-ref env var)
+  (let ((var-pair (assoc var env)))
+   (cond
+   [var-pair (emit-mov-stack-eax (cdr var-pair))]
+   [else     (error "undefined" var)])))
+
+(define (var? expr)
+  (symbol? expr))
+
+(define (emit-expr si env expr)
   (cond
    [(immediate? expr) (emit-immediate expr)]
-   [(if? expr)        (emit-if si expr)]
-   [(primcall? expr)  (emit-primcall si expr)]
-   [else              (error "expression not supported")]))
+   [(if? expr)        (emit-if si env expr)]
+   [(primcall? expr)  (emit-primcall si env expr)]
+   [(let? expr)       (emit-let si env expr)]
+   [(var? expr)       (emit-variable-ref env expr)]
+   [else              (error "expression not supported" expr)]))
 
 (define (emit-function-header function-name)
   (emit "    .globl ~a" function-name)
@@ -291,7 +358,7 @@
 (define (emit-program expr)
   (emit-prelude)
   (emit-function-header "L_scheme_entry")
-  (emit-expr (- wordsize) expr)
+  (emit-expr (- wordsize) '() expr)
   (emit "    ret")
   (emit "")
   (emit-function-header "scheme_entry")
@@ -314,4 +381,7 @@
 
 (write-program
  "target/scheme.s"
- (compile-program '(fx= (fx+ 10 -10) (fxadd1 -1))))
+ (compile-program
+  '(let ((x 1))
+     (let ((y (fxadd1 x)))
+      (fx+ x y)))))

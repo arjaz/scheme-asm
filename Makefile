@@ -1,5 +1,7 @@
 # TODO: all the machinery to read the program from a file
 #       for now you're assumed to write the file from the repl
+all: compile_gcc
+
 compile_scheme:
 	guile compiler.scm
 
