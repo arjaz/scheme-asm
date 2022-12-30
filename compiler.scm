@@ -327,6 +327,100 @@
                      (extend-env (lhs b) si new-env)))]))
   (process-let (let-bindings expr) si env))
 
+;; letrec is used for toplevel function bindings
+
+;; moves the %esp register by si points
+;; should be used to point the stack at the last
+;; local variable before the function call
+;; (so `call` would adjust the %esp register by 4)
+;; or return the %esp register to its previous value
+;; after the call
+(define (emit-adjust-base si)
+  (if (>= si 0)
+      (emit "    addl $~s, %esp" si)
+      (emit "    subl $~s, %esp" (- si))))
+
+(define (emit-call si f)
+  (emit "    call ~a" f))
+
+;; (app lvar expr ...)
+(define (call-target expr)
+  (cadr expr))
+
+(define (call-args expr)
+  (cddr expr))
+
+(define (app? expr)
+  (eq? (car expr) 'app))
+
+;; application evaluates all function arguments
+;; and places them on the stack
+;; reserving one empty word between the current function locals (the current si)
+;; and the evaluated parameters to place the return address there (via `call`)
+(define (emit-app si env expr)
+  (define (emit-arguments si args)
+    (unless (null? args)
+      (emit-expr si env (car args))
+      (emit-mov-eax-stack si)
+      (emit-arguments (- si wordsize) (cdr args))))
+  ;; (- si wordsize) to reserve a slot
+  (emit-arguments (- si wordsize) (call-args expr))
+  ;; (+ si wordsize) as si points to the next empty slot
+  (emit-adjust-base (+ si wordsize))
+  (emit-call si (cdr (assoc (call-target expr) env)))
+  (emit-adjust-base (- (+ si wordsize))))
+
+;; (lambda (arg1 ...) body)
+(define (lambda-formals expr)
+  (cadr expr))
+
+(define (lambda-body expr)
+  (caddr expr))
+
+(define (emit-lambda env)
+  (lambda (expr label)
+    (emit-function-header label)
+    (let ([fmls (lambda-formals expr)]
+          [body (lambda-body expr)])
+      (let f ([fmls fmls]
+              [si   (- wordsize)]
+              [env  env])
+        (cond
+         [(null? fmls)
+          (begin
+            (emit-expr si env body)
+            (emit "    ret"))]
+         [else
+          (f (cdr fmls)
+             (- si wordsize)
+             (extend-env (first fmls) si env))])))))
+
+;; make a list of unique labels for each of the variable names
+(define (unique-labels lvars)
+  (map (lambda (lvar) (string-append (unique-label) "_" (symbol->string lvar))) lvars))
+
+;; (letrec ((lvar <lambda>) ...) body)
+(define (letrec? expr)
+  (eq? (car expr) 'letrec))
+
+(define (letrec-bindings expr)
+  (cadr expr))
+
+(define (letrec-body expr)
+  (caddr expr))
+
+(define (make-initial-env lvals labels)
+  (map (lambda (lval label) (cons lval label)) lvals labels))
+
+(define (emit-letrec expr)
+  (let* ([bindings (letrec-bindings expr)]
+         [lvars    (map lhs bindings)]
+         [lambdas  (map rhs bindings)]
+         [labels   (unique-labels lvars)]
+         [env      (make-initial-env lvars labels)])
+    (for-each (emit-lambda env) lambdas labels)
+    (emit-scheme-entry (letrec-body expr) env)))
+
 ;; variables are stored on the stack
 (define (emit-variable-ref env var)
   (let ((var-pair (assoc var env)))
@@ -344,30 +438,34 @@
    [(primcall? expr)  (emit-primcall si env expr)]
    [(let? expr)       (emit-let si env expr)]
    [(var? expr)       (emit-variable-ref env expr)]
+   [(app? expr)       (emit-app si env expr)]
    [else              (error "expression not supported" expr)]))
 
 (define (emit-function-header function-name)
+  (emit "")
   (emit "    .globl ~a" function-name)
   (emit "    .type ~a, @function" function-name)
-  (emit "")
   (emit "~a:" function-name))
 
 (define (emit-prelude)
   (emit "    .text"))
 
-(define (emit-program expr)
-  (emit-prelude)
+(define (emit-scheme-entry expr env)
   (emit-function-header "L_scheme_entry")
-  (emit-expr (- wordsize) '() expr)
+  (emit-expr (- wordsize) env expr)
   (emit "    ret")
-  (emit "")
   (emit-function-header "scheme_entry")
   (emit "    movl %esp, %ecx")
   (emit "    movl 4(%esp), %esp")
   (emit "    call L_scheme_entry")
   (emit "    movl %ecx, %esp")
-  (emit "    ret")
-  (emit ""))
+  (emit "    ret"))
+
+(define (emit-program expr)
+  (emit-prelude)
+  (cond
+   [(letrec? expr) (emit-letrec expr)]
+   [else           (emit-scheme-entry expr '())]))
 
 (define (compile-program expr)
   (set! program '())
@@ -382,6 +480,4 @@
 (write-program
  "target/scheme.s"
  (compile-program
-  '(let ((x 1))
-     (let ((y (fxadd1 x)))
-      (fx+ x y)))))
+  '(letrec ((left (lambda (x y) x))) (app left -10 +10))))
