@@ -62,7 +62,6 @@
    [else        (error "not an immediate constant")]))
 
 (define (emit-immediate x)
-  (emit-comment "imm: ~s, 0b~a" x (number->string (immediate-rep x) 2))
   (emit "    movl $~s, %eax" (immediate-rep x)))
 
 ;; Primitives are stored in the primitives-alist in the following form:
@@ -103,9 +102,7 @@
   (let ([prim (car expr)]
         [args (cdr expr)])
     (check-primcall-args prim args)
-    (emit-comment "prim: ~a" prim)
-    (apply (primitive-emitter prim) si env args)
-    (emit-comment "^ prim: ~a" prim)))
+    (apply (primitive-emitter prim) si env args)))
 
 (define (emit-cmp->bool)
   ;; set the lower 16 bits of the result (%al) to 1 if cmp is true
@@ -267,22 +264,27 @@
 ;; TODO: and, or
 (define (emit-if si env expr)
   (let ([else-label (unique-label)]
-        [end-label (unique-label)])
-    (emit-comment "if test")
+        [end-label  (unique-label)])
     (emit-expr si env (if-test expr))
-    (emit-comment "^ if test")
     (emit "    cmp $~s, %al" bool-f)
     (emit "    je ~a" else-label)
-    (emit-comment "then")
     (emit-expr si env (if-then expr))
     (emit "    jmp ~a" end-label)
-    (emit-comment "^ then")
-    (emit-comment "else")
     (emit "~a:" else-label)
     (emit-expr si env (if-else expr))
-    (emit-comment "^ else")
-    (emit "~a:" end-label)
-    (emit-comment "^ if")))
+    (emit "~a:" end-label)))
+
+(define (emit-tail-if si env expr)
+  (let ([else-label (unique-label)]
+        [end-label  (unique-label)])
+    (emit-tail-expr si env (if-test expr))
+    (emit "    cmp $~s, %al" bool-f)
+    (emit "    je ~a" else-label)
+    (emit-tail-expr si env (if-then expr))
+    (emit "    jmp ~a" end-label)
+    (emit "~a:" else-label)
+    (emit-tail-expr si env (if-else expr))
+    (emit "~a:" end-label)))
 
 ;; (let ((bind1 expr1) ...) body)
 (define (let? expr)
@@ -312,16 +314,25 @@
   (define (process-let bindings si new-env)
     (cond
      [(null? bindings)
-      (begin
-        (emit-comment "let expr body")
-        (emit-expr si new-env (let-body expr))
-        (emit-comment "^ let expr body"))]
+      (emit-expr si new-env (let-body expr))]
      [else
       (let ([b (car bindings)])
-        (emit-comment "let rhs (~s)" (lhs b))
         (emit-expr si env (rhs b))
         (emit-mov-eax-stack si)
-        (emit-comment "^ let rhs (~s)" (lhs b))
+        (process-let (cdr bindings)
+                     (next-stack-index si)
+                     (extend-env (lhs b) si new-env)))]))
+  (process-let (let-bindings expr) si env))
+
+(define (emit-tail-let si env expr)
+  (define (process-let bindings si new-env)
+    (cond
+     [(null? bindings)
+      (emit-tail-expr si new-env (let-body expr))]
+     [else
+      (let ([b (car bindings)])
+        (emit-tail-expr si env (rhs b))
+        (emit-mov-eax-stack si)
         (process-let (cdr bindings)
                      (next-stack-index si)
                      (extend-env (lhs b) si new-env)))]))
@@ -340,8 +351,11 @@
       (emit "    addl $~s, %esp" si)
       (emit "    subl $~s, %esp" (- si))))
 
-(define (emit-call si f)
+(define (emit-call f)
   (emit "    call ~a" f))
+
+(define (emit-jmp f)
+  (emit "    jmp ~a" f))
 
 ;; (app lvar expr ...)
 (define (call-target expr)
@@ -367,8 +381,29 @@
   (emit-arguments (- si wordsize) (call-args expr))
   ;; (+ si wordsize) as si points to the next empty slot
   (emit-adjust-base (+ si wordsize))
-  (emit-call si (cdr (assoc (call-target expr) env)))
+  ;; TODO: compiler error when name not found
+  (emit-call (cdr (assoc (call-target expr) env)))
   (emit-adjust-base (- (+ si wordsize))))
+
+;; tail call application differs from the usual one:
+;; - jmp instruction is used instead of the call one
+;; this way the %esp register is not modified, and we can reuse the stack
+;; - arguments are evaluated without reserving a slot and then moved to the expected local places
+;; they have to be evaluated in different spots first to avoid overwriting the needed local variables
+(define (emit-tail-app si env expr)
+  (define (emit-tail-arguments si args)
+    (unless (null? args)
+      (emit-tail-expr si env (car args))
+      (emit-mov-eax-stack si)
+      (emit-tail-arguments (- si wordsize) (cdr args))))
+  (define (emit-mov-tail-arguments argument-number si args)
+    (unless (null? args)
+      (emit-mov-stack-eax si)
+      (emit-mov-eax-stack (- (* 4 argument-number)))
+      (emit-mov-tail-arguments (+ 1 argument-number) (- si wordsize) (cdr args))))
+  (emit-tail-arguments si (call-args expr))
+  (emit-mov-tail-arguments 1 si (call-args expr))
+  (emit-jmp (cdr (assoc (call-target expr) env))))
 
 ;; (lambda (arg1 ...) body)
 (define (lambda-formals expr)
@@ -388,7 +423,7 @@
         (cond
          [(null? fmls)
           (begin
-            (emit-expr si env body)
+            (emit-tail-expr si env body)
             (emit "    ret"))]
          [else
           (f (cdr fmls)
@@ -397,7 +432,9 @@
 
 ;; make a list of unique labels for each of the variable names
 (define (unique-labels lvars)
-  (map (lambda (lvar) (string-append (unique-label) "_" (symbol->string lvar))) lvars))
+  (if noisy?
+      (map (lambda (lvar) (string-append (unique-label) "_" (symbol->string lvar))) lvars)
+      (map (lambda (lvar) (unique-label)) lvars)))
 
 ;; (letrec ((lvar <lambda>) ...) body)
 (define (letrec? expr)
@@ -430,6 +467,16 @@
 
 (define (var? expr)
   (symbol? expr))
+
+(define (emit-tail-expr si env expr)
+  (cond
+   [(immediate? expr) (emit-immediate expr)]
+   [(if? expr)        (emit-tail-if si env expr)]
+   [(primcall? expr)  (emit-primcall si env expr)]
+   [(let? expr)       (emit-tail-let si env expr)]
+   [(var? expr)       (emit-variable-ref env expr)]
+   [(app? expr)       (emit-tail-app si env expr)]
+   [else              (error "expression not supported" expr)]))
 
 (define (emit-expr si env expr)
   (cond
@@ -480,4 +527,8 @@
 (write-program
  "target/scheme.s"
  (compile-program
-  '(letrec ((left (lambda (x y) x))) (app left -10 +10))))
+  '(letrec ([sum (lambda (n acc)
+                   (if (fxzero? n)
+                       acc
+                       (app sum (fxsub1 n) (fx+ n acc))))])
+     (app sum 10 0))))
