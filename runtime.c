@@ -13,8 +13,19 @@
 #define	bool_t 0b01101111
 #define empty_list 0b00111111
 
+typedef struct {
+	void *eax;                  /* 0 scratch */
+	void *ebx;                  /* 4 preserve */
+	void *ecx;                  /* 8 scratch */
+	void *edx;                  /* 12 scratch */
+	void *esi;                  /* 16 preserve */
+	void *edi;                  /* 20 preserve */
+	void *ebp;                  /* 24 preserve */
+	void *esp;                  /* 28 preserve */
+} context_t;
+
 typedef unsigned int scm_ptr;
-scm_ptr scheme_entry(char*);
+scm_ptr scheme_entry(context_t*, char*, char*);
 
 static void print_scm_ptr(scm_ptr x) {
 	if ((x & fixnum_mask) == fixnum_tag) {
@@ -76,7 +87,15 @@ int main(int argc, char** argv) {
 	int stack_size = 16 * 4096; /* holds 16k cells */
 	char* stack_top = allocate_protected_space(stack_size);
 	char* stack_base = stack_top + stack_size;
-	print_scm_ptr(scheme_entry(stack_base));
+
+	int heap_size = 16 * 4096;
+	char* heap_base = allocate_protected_space(heap_size);
+
+	context_t context;
+	print_scm_ptr(scheme_entry(&context, stack_base, heap_base));
+
 	deallocate_proteced_space(stack_top, stack_size);
+	deallocate_proteced_space(heap_base, heap_size);
+
 	return 0;
 }

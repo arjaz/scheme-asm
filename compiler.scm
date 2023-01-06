@@ -502,10 +502,24 @@
   (emit-expr (- wordsize) env expr)
   (emit "    ret")
   (emit-function-header "scheme_entry")
-  (emit "    movl %esp, %ecx")
-  (emit "    movl 4(%esp), %esp")
+  (emit "    movl 4(%esp), %ecx")
+  ;; preserve %ebx, %esi, %edi, %ebp, %esp
+  (emit "    movl %ebx, 4(%ecx)")
+  (emit "    movl %esi, 16(%ecx)")
+  (emit "    movl %edi, 20(%ecx)")
+  (emit "    movl %ebp, 24(%ecx)")
+  (emit "    movl %esp, 28(%ecx)")
+  ;; load the passed heap pointer into the allocation register
+  (emit "    movl 12(%esp), %ebp")
+  ;; load the passed stack pointer into the stack register
+  (emit "    movl 8(%esp), %esp")
   (emit "    call L_scheme_entry")
-  (emit "    movl %ecx, %esp")
+  (emit "    movl 4(%ecx), %ebx")
+  (emit "    movl 16(%ecx), %esi")
+  (emit "    movl 20(%ecx), %edi")
+  (emit "    movl 24(%ecx), %ebp")
+  (emit "    movl 28(%ecx), %esp")
+  (emit "    movl 4(%esp), %ecx")
   (emit "    ret"))
 
 (define (emit-program expr)
