@@ -1,6 +1,6 @@
 (use-modules (srfi srfi-1))
 
-(define noisy? #f)
+(define noisy? #t)
 (define program '())
 
 (define (emit instruction . args)
@@ -39,6 +39,28 @@
 (define char-mask #b11111111)
 (define char-tag #b00001111)
 (define empty-list #b00111111)
+
+;; pointer types:
+;; pairs, closures, symbols, vectors and strings
+;; pointers are represented as 8-bit aligned words with 3 lowest bits representing the tag
+;; and 29 highest bits representing the address of the object
+;; 001 are pairs
+;; TODO: 010 are closures
+;; TODO: 011 are symbols
+;; TODO: 101 are vectors
+;; TODO: 110 are strings
+
+(define pair-tag #b001)
+(define pair-mask #b111)
+;; if address is ...001
+;; then car offset is at that address - pair-tag + 0, as we need to account for the tag
+;; cdr is at address - pair-tag + 4
+;; when we allocate, we allocate based on ...000 pointer
+;; so the offsets are 0 and 4 respectively
+(define car-offset 0)
+(define cdr-offset 4)
+(define pair-size 8)
+
 (define wordsize 4) ; bytes
 
 (define fixnum-bits (- (* wordsize 8) fixnum-shift)) ; 30 bits
@@ -93,8 +115,8 @@
 (define (primcall? expr)
   (and (pair? expr) (primitive? (car expr))))
 
-;; for now just checks the number of arguments
 (define (check-primcall-args prim args)
+  "For now just checks the number of arguments."
   (unless (= (length args) (primitive-args-number prim))
     (error "wrong number of arguments")))
 
@@ -183,6 +205,14 @@
   (emit-expr si env arg)
   (emit "    xorl $~s, %eax" (immediate-rep fixnum-min)))
 
+(define-primitive (car si env arg)
+  (emit-expr si env arg)
+  (emit "    movl ~s(%eax), %eax" (- car-offset pair-tag)))
+
+(define-primitive (cdr si env arg)
+  (emit-expr si env arg)
+  (emit "    movl ~s(%eax), %eax" (- cdr-offset pair-tag)))
+
 ;; binary primitives:
 ;; fx+
 ;; fx-
@@ -245,6 +275,17 @@
   (emit-expr (next-stack-index si) env arg2)
   (emit "    cmpl ~s(%esp), %eax" si)
   (emit-cmp->bool))
+
+(define-primitive (cons si env arg1 arg2)
+  (emit-expr si env arg1)
+  (emit-mov-eax-stack si)
+  (emit-expr (next-stack-index si) env arg2)
+  (emit "    movl %eax, ~s(%ebp)" cdr-offset)
+  (emit-mov-stack-eax si)
+  (emit "    movl %eax, ~s(%ebp)" car-offset)
+  (emit "    movl %ebp, %eax")
+  (emit "    orl $~s, %eax" pair-tag)
+  (emit "    addl $~s, %ebp" pair-size))
 
 ;; (if test then else)
 (define (if? expr)
@@ -438,7 +479,7 @@
 
 ;; (letrec ((lvar <lambda>) ...) body)
 (define (letrec? expr)
-  (eq? (car expr) 'letrec))
+  (and (pair? expr) (eq? (car expr) 'letrec)))
 
 (define (letrec-bindings expr)
   (cadr expr))
@@ -541,8 +582,4 @@
 (write-program
  "target/scheme.s"
  (compile-program
-  '(letrec ([sum (lambda (n acc)
-                   (if (fxzero? n)
-                       acc
-                       (app sum (fxsub1 n) (fx+ n acc))))])
-     (app sum 10 0))))
+  '(cdr (car (cons (cons () #t) (cons 20 1))))))

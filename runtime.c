@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <stdbool.h>
 
+/* immediates */
 #define fixnum_shift 2
 #define fixnum_mask 0b11
 #define fixnum_tag 0b00
@@ -12,6 +14,12 @@
 #define	bool_f 0b00101111
 #define	bool_t 0b01101111
 #define empty_list 0b00111111
+
+/* pointers */
+#define pair_tag 0b001
+#define pair_mask 0b111
+#define car_offset 0
+#define cdr_offset 4
 
 typedef struct {
 	void *eax;                  /* 0 scratch */
@@ -27,7 +35,7 @@ typedef struct {
 typedef unsigned int scm_ptr;
 scm_ptr scheme_entry(context_t*, char*, char*);
 
-static void print_scm_ptr(scm_ptr x) {
+static void print_scm_ptr(scm_ptr x, bool with_newline) {
 	if ((x & fixnum_mask) == fixnum_tag) {
 		printf("%d", ((int) x) >> fixnum_shift);
 	} else if ((x & char_mask) == char_tag) {
@@ -38,10 +46,20 @@ static void print_scm_ptr(scm_ptr x) {
 		printf("#t");
 	} else if (x == empty_list) {
 		printf("()");
+	} else if ((x & pair_mask) == pair_tag) {
+		scm_ptr car = *(scm_ptr*)(x - pair_tag + car_offset);
+		scm_ptr cdr = *(scm_ptr*)(x - pair_tag + cdr_offset);
+		printf("(");
+		print_scm_ptr(car, false);
+		printf(" . ");
+		print_scm_ptr(cdr, false);
+		printf(")");
 	} else {
 		printf("#<unknown 0x%08x>", x);
 	}
-	printf("\n");
+	if (with_newline) {
+		printf("\n");
+	}
 }
 
 static char* allocate_protected_space(int size) {
@@ -92,7 +110,7 @@ int main(int argc, char** argv) {
 	char* heap_base = allocate_protected_space(heap_size);
 
 	context_t context;
-	print_scm_ptr(scheme_entry(&context, stack_base, heap_base));
+	print_scm_ptr(scheme_entry(&context, stack_base, heap_base), true);
 
 	deallocate_proteced_space(stack_top, stack_size);
 	deallocate_proteced_space(heap_base, heap_size);
